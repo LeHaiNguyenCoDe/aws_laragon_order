@@ -4,14 +4,55 @@
     "type": "module",
     "scripts": {
         "build": "vite build",
-        "dev": "vite"
+        "dev": "vite",
+        "preview": "vite preview",
+        "lint": "eslint resources/js --ext .js,.vue --fix",
+        "lint:check": "eslint resources/js --ext .js,.vue",
+        "format": "prettier --write resources/js/**/*.{js,vue}",
+        "format:check": "prettier --check resources/js/**/*.{js,vue}",
+        "test:e2e": "playwright test",
+        "test:e2e:ui": "playwright test --ui",
+        "test:e2e:headed": "playwright test --headed",
+        "test:e2e:debug": "playwright test --debug",
+        "security:audit": "npm audit --audit-level=moderate",
+        "security:fix": "npm audit fix"
     },
     "devDependencies": {
+        "@playwright/test": "^1.40.0",
         "@tailwindcss/vite": "^4.0.0",
         "axios": "^1.11.0",
         "concurrently": "^9.0.1",
+        "eslint": "^8.55.0",
+        "eslint-config-prettier": "^9.1.0",
+        "eslint-plugin-vue": "^9.19.0",
         "laravel-vite-plugin": "^2.0.0",
+        "prettier": "^3.1.0",
         "tailwindcss": "^4.0.0",
         "vite": "^7.0.4"
-    }
+    },
+    "dependencies": {
+        "alpinejs": "^3.13.0",
+        "lodash": "^4.17.21"
+    },
+    "engines": {
+        "node": ">=18.0.0",
+        "npm": ">=9.0.0"
+    },
+    "browserslist": [
+        "> 1%",
+        "last 2 versions",
+        "not dead",
+        "not ie 11"
+    ],
+    "keywords": [
+        "laravel",
+        "php",
+        "cicd",
+        "devops",
+        "aws",
+        "docker",
+        "terraform"
+    ],
+    "author": "DevOps Team",
+    "license": "MIT"
 }
