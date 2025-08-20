@@ -1,16 +1,10 @@
-name: 🚀 Professional Laravel CI/CD Pipeline
+name: 🚀 Professional Laravel CI/CD Pipeline - AKS Deployment
 
 on:
   push:
     branches: [ main, master, develop, staging, production ]
-    paths:
-      - 'laravel/**'
-      - '.github/workflows/**'
   pull_request:
     branches: [ main, master ]
-    paths:
-      - 'laravel/**'
-      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -29,13 +23,19 @@ on:
         type: boolean
 
 env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: laravel-app
-  ECS_CLUSTER: laravel-cluster
+  # Azure Configuration
+  AZURE_LOCATION: eastus
+  ACR_REGISTRY: laravelacr
+  AKS_CLUSTER: laravel-aks-cluster
+  RESOURCE_GROUP: laravel-rg
+
+  # Build Configuration
   TERRAFORM_VERSION: 1.6.0
   NODE_VERSION: 18
   PHP_VERSION: 8.2
-  WORKING_DIRECTORY: ./laravel
+
+  # Laravel repository - no subdirectory needed
+  WORKING_DIRECTORY: .
 
 jobs:
   # 🔍 Pre-flight Checks
@@ -80,9 +80,9 @@ jobs:
         echo "🏗️ Deploy Infrastructure: $([[ $ENV != "demo" ]] && echo "Yes" || echo "No")"
         echo "🧪 Run Tests: $([[ $SKIP_TESTS != "true" ]] && echo "Yes" || echo "No")"
 
-  # 🏗️ Infrastructure Provisioning
+  # 🏗️ Infrastructure Provisioning with Azure
   infrastructure:
-    name: 🏗️ Infrastructure Provisioning
+    name: 🏗️ Azure Infrastructure Provisioning
     runs-on: ubuntu-latest
     needs: preflight
     if: needs.preflight.outputs.deploy_infrastructure == 'true'
@@ -91,45 +91,48 @@ jobs:
     - name: 📥 Checkout Code
       uses: actions/checkout@v4
 
-    - name: 🔐 Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
+    - name: 🔐 Azure Login
+      uses: azure/login@v1
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: 🛠️ Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-    - name: 🔧 Terraform Init
+    - name: 🔧 Terraform Init for Azure
       working-directory: ${{ env.WORKING_DIRECTORY }}/terraform
       run: |
         terraform init \
-          -backend-config="bucket=terraform-state-${{ needs.preflight.outputs.environment }}" \
-          -backend-config="key=laravel-app/terraform.tfstate" \
-          -backend-config="region=${{ env.AWS_REGION }}"
+          -backend-config="storage_account_name=${{ secrets.AZURE_STORAGE_ACCOUNT }}" \
+          -backend-config="container_name=terraform-state" \
+          -backend-config="key=laravel-${{ needs.preflight.outputs.environment }}.tfstate" \
+          -backend-config="resource_group_name=${{ secrets.AZURE_STORAGE_RG }}"
 
-    - name: 📋 Terraform Plan
+    - name: 📋 Terraform Plan for Azure
       working-directory: ${{ env.WORKING_DIRECTORY }}/terraform
       run: |
         terraform plan \
           -var="environment=${{ needs.preflight.outputs.environment }}" \
-          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var="location=${{ env.AZURE_LOCATION }}" \
+          -var="resource_group_name=${{ env.RESOURCE_GROUP }}" \
+          -var="aks_cluster_name=${{ env.AKS_CLUSTER }}" \
+          -var="acr_name=${{ env.ACR_REGISTRY }}" \
           -var="database_password=${{ secrets.DATABASE_PASSWORD }}" \
           -out=tfplan
 
-    - name: 🚀 Terraform Apply
+    - name: 🚀 Terraform Apply for Azure
       working-directory: ${{ env.WORKING_DIRECTORY }}/terraform
       run: terraform apply -auto-approve tfplan
 
-    - name: 📤 Export Infrastructure Outputs
+    - name: 📤 Export Azure Infrastructure Outputs
       working-directory: ${{ env.WORKING_DIRECTORY }}/terraform
       run: |
-        echo "VPC_ID=$(terraform output -raw vpc_id)" >> $GITHUB_ENV
-        echo "SUBNET_IDS=$(terraform output -raw subnet_ids)" >> $GITHUB_ENV
-        echo "SECURITY_GROUP_ID=$(terraform output -raw security_group_id)" >> $GITHUB_ENV
+        echo "RESOURCE_GROUP_NAME=$(terraform output -raw resource_group_name)" >> $GITHUB_ENV
+        echo "AKS_CLUSTER_NAME=$(terraform output -raw aks_cluster_name)" >> $GITHUB_ENV
+        echo "ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)" >> $GITHUB_ENV
+        echo "VNET_ID=$(terraform output -raw vnet_id)" >> $GITHUB_ENV
 
   # 🧪 Code Quality & Security Analysis
   code_analysis:
@@ -279,25 +282,25 @@ jobs:
     - name: 🐳 Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: 🔐 Configure AWS Credentials
+    - name: 🔐 Azure Login
       if: needs.preflight.outputs.environment != 'demo'
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: azure/login@v1
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: 🐳 Login to Amazon ECR
+    - name: 🐳 Login to Azure Container Registry
       if: needs.preflight.outputs.environment != 'demo'
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      id: login-acr
+      run: |
+        az acr login --name ${{ env.ACR_REGISTRY }}
+        echo "registry=${{ env.ACR_REGISTRY }}.azurecr.io" >> $GITHUB_OUTPUT
 
     - name: 🏷️ Extract Metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
         images: |
-          ${{ needs.preflight.outputs.environment != 'demo' && steps.login-ecr.outputs.registry || 'local' }}/${{ env.ECR_REPOSITORY }}
+          ${{ needs.preflight.outputs.environment != 'demo' && format('{0}.azurecr.io/laravel-app', env.ACR_REGISTRY) || 'local/laravel-app' }}
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -352,37 +355,107 @@ jobs:
     - name: 📥 Checkout Code
       uses: actions/checkout@v4
 
-    - name: 🔐 Configure AWS Credentials
+    - name: 🔐 Azure Login
       if: needs.preflight.outputs.environment != 'demo'
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: azure/login@v1
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: 📝 Update ECS Task Definition
+    - name: 🎯 Set AKS Context
       if: needs.preflight.outputs.environment != 'demo'
-      id: task-def
-      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      uses: azure/aks-set-context@v3
       with:
-        task-definition: ${{ env.WORKING_DIRECTORY }}/.aws/task-definition-${{ needs.preflight.outputs.environment }}.json
-        container-name: laravel-app
-        image: ${{ needs.build.outputs.image_tag }}
-        environment-variables: |
-          APP_ENV=${{ needs.preflight.outputs.environment }}
-          APP_DEBUG=${{ needs.preflight.outputs.environment != 'production' }}
-          LOG_LEVEL=${{ needs.preflight.outputs.environment == 'production' && 'error' || 'debug' }}
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.AKS_CLUSTER }}
 
-    - name: 🚀 Deploy to Amazon ECS
+    - name: 📝 Create Kubernetes Deployment Manifest
+      if: needs.preflight.outputs.environment != 'demo'
+      run: |
+        cat > k8s-deployment.yaml << EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: laravel-app-${{ needs.preflight.outputs.environment }}
+          namespace: ${{ needs.preflight.outputs.environment }}
+        spec:
+          replicas: ${{ needs.preflight.outputs.environment == 'production' && 3 || 2 }}
+          selector:
+            matchLabels:
+              app: laravel-app
+              environment: ${{ needs.preflight.outputs.environment }}
+          template:
+            metadata:
+              labels:
+                app: laravel-app
+                environment: ${{ needs.preflight.outputs.environment }}
+            spec:
+              containers:
+              - name: laravel-app
+                image: ${{ needs.build.outputs.image_tag }}
+                ports:
+                - containerPort: 80
+                env:
+                - name: APP_ENV
+                  value: "${{ needs.preflight.outputs.environment }}"
+                - name: APP_DEBUG
+                  value: "${{ needs.preflight.outputs.environment != 'production' }}"
+                - name: LOG_LEVEL
+                  value: "${{ needs.preflight.outputs.environment == 'production' && 'error' || 'debug' }}"
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "512Mi"
+                    cpu: "500m"
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: laravel-service-${{ needs.preflight.outputs.environment }}
+          namespace: ${{ needs.preflight.outputs.environment }}
+        spec:
+          selector:
+            app: laravel-app
+            environment: ${{ needs.preflight.outputs.environment }}
+          ports:
+          - port: 80
+            targetPort: 80
+          type: LoadBalancer
+        EOF
+
+    - name: 🚀 Deploy to Azure Kubernetes Service
       if: needs.preflight.outputs.environment != 'demo'
       id: deploy
-      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-      with:
-        task-definition: ${{ steps.task-def.outputs.task-definition }}
-        service: laravel-service-${{ needs.preflight.outputs.environment }}
-        cluster: ${{ env.ECS_CLUSTER }}-${{ needs.preflight.outputs.environment }}
-        wait-for-service-stability: true
-        wait-for-minutes: 10
+      run: |
+        # Create namespace if it doesn't exist
+        kubectl create namespace ${{ needs.preflight.outputs.environment }} --dry-run=client -o yaml | kubectl apply -f -
+
+        # Apply the deployment
+        kubectl apply -f k8s-deployment.yaml
+
+        # Wait for deployment to be ready
+        kubectl rollout status deployment/laravel-app-${{ needs.preflight.outputs.environment }} -n ${{ needs.preflight.outputs.environment }} --timeout=600s
+
+        # Get service external IP
+        EXTERNAL_IP=""
+        for i in {1..30}; do
+          EXTERNAL_IP=$(kubectl get service laravel-service-${{ needs.preflight.outputs.environment }} -n ${{ needs.preflight.outputs.environment }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [[ -n "$EXTERNAL_IP" ]]; then
+            break
+          fi
+          echo "⏳ Waiting for external IP... (attempt $i/30)"
+          sleep 10
+        done
+
+        if [[ -n "$EXTERNAL_IP" ]]; then
+          echo "application_url=http://$EXTERNAL_IP" >> $GITHUB_OUTPUT
+          echo "✅ Application deployed at: http://$EXTERNAL_IP"
+        else
+          echo "⚠️ Could not get external IP, using cluster IP"
+          CLUSTER_IP=$(kubectl get service laravel-service-${{ needs.preflight.outputs.environment }} -n ${{ needs.preflight.outputs.environment }} -o jsonpath='{.spec.clusterIP}')
+          echo "application_url=http://$CLUSTER_IP" >> $GITHUB_OUTPUT
+        fi
 
     - name: 🧪 Demo Deployment (LocalStack)
       if: needs.preflight.outputs.environment == 'demo'
@@ -425,11 +498,46 @@ jobs:
       if: needs.preflight.outputs.environment != 'demo'
       run: |
         echo "🗄️ Running database migrations..."
-        aws ecs run-task \
-          --cluster ${{ env.ECS_CLUSTER }}-${{ needs.preflight.outputs.environment }} \
-          --task-definition laravel-migration-${{ needs.preflight.outputs.environment }} \
-          --launch-type FARGATE \
-          --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_IDS],securityGroups=[$SECURITY_GROUP_ID],assignPublicIp=ENABLED}"
+
+        # Create migration job manifest
+        cat > migration-job.yaml << EOF
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: laravel-migration-$(date +%s)
+          namespace: ${{ needs.preflight.outputs.environment }}
+        spec:
+          template:
+            spec:
+              containers:
+              - name: laravel-migration
+                image: ${{ needs.build.outputs.image_tag }}
+                command: ["php", "artisan", "migrate", "--force"]
+                env:
+                - name: APP_ENV
+                  value: "${{ needs.preflight.outputs.environment }}"
+                - name: DB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: laravel-secrets
+                      key: db-host
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: laravel-secrets
+                      key: db-password
+              restartPolicy: Never
+          backoffLimit: 3
+        EOF
+
+        # Apply migration job
+        kubectl apply -f migration-job.yaml
+
+        # Wait for job completion
+        JOB_NAME=$(kubectl get jobs -n ${{ needs.preflight.outputs.environment }} --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+        kubectl wait --for=condition=complete job/$JOB_NAME -n ${{ needs.preflight.outputs.environment }} --timeout=300s
+
+        echo "✅ Database migration completed successfully"
 
   # 📊 Post-Deployment Testing
   post_deployment_tests:
